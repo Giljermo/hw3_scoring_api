@@ -194,7 +194,6 @@ class ValidatorOnlineScoreRequest(OnlineScoreRequest):
             self.error_messages += 'должна присутсвует хоть одна пара ' \
                                    '"phone-email, first name-last name, gender-birthday" с непустыми значениями'
 
-
     def set_context(self, ctx):
         has = []
         if self.phone:
