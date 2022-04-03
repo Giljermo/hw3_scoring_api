@@ -38,115 +38,148 @@ GENDERS = {
 }
 
 
+class ValidationError(Exception):
+    pass
+
+
 class BaseField(ABC):
 
     def __init__(self, required=False, nullable=False):
         self.required = required
         self.nullable = nullable
 
-    def __set_name__(self, owner, name):
-        self.public_name = name
-        self.private_name = '_' + name
-
-    def __get__(self, instance, cls):
-        return getattr(instance, self.private_name)
-
-    def __set__(self, obj, value):
-        val = value.get(self.public_name)
-        self.validate(val, obj)
-        setattr(obj, self.private_name, val)
-
     @abstractmethod
-    def validate(self, value, obj):
+    def valid(self, value):
         if (value is None) and self.required:
-            obj.error_messages += f'поле "{self.public_name}" должно быть обязательным; '
+            raise ValidationError(f'Поле должно быть обязательным;')
 
         if (not value) and not self.nullable:
-            obj.error_messages += f'поле "{self.public_name}" не может быть пустым; '
+            raise ValidationError(f'Поле не может быть пустым;')
 
 
 class CharField(BaseField):
-    def validate(self, value, obj):
-        super().validate(value, obj)
+    def valid(self, value):
+        super().valid(value)
         if value and not isinstance(value, str):
-            obj.error_messages += f'поле "{self.public_name}" должно быть строкой; '
+            raise ValidationError(f'поле должно быть строкой;')
 
 
 class ArgumentsField(BaseField):
-    def validate(self, value, obj):
-        super().validate(value, obj)
+    def valid(self, value):
+        super().valid(value)
         if not isinstance(value, dict):
-            obj.error_messages += f'поле "{self.public_name}" должно быть словарем; '
+            raise ValidationError(f'поле должно быть словарем;')
 
 
 class EmailField(CharField):
-    def validate(self, value, obj):
-        super().validate(value, obj)
+    def valid(self, value):
+        super().valid(value)
         if value and ('@' not in value):
-            obj.error_messages += f'поле "{self.public_name}" должно быть почтовым адресом; '
+            raise ValidationError(f'поле должно быть почтовым адресом;')
 
 
 class PhoneField(BaseField):
-    def validate(self, value, obj):
-        super().validate(value, obj)
+    def valid(self, value):
+        super().valid(value)
         if value is None:
             return
 
         if not isinstance(value, (str, int)):
-            obj.error_messages += f'поле "{self.public_name}" должно быть строкой или числом; '
+            raise ValidationError(f'поле должно быть строкой или числом;')
 
         if len(str(value)) != 11:
-            obj.error_messages += f'поле "{self.public_name}" должен содержать 11 символов; '
+            raise ValidationError(f'поле должен содержать 11 символов;')
         if not str(value).startswith('7'):
-            obj.error_messages += f'поле "{self.public_name}" должно начинатьс с цифры "7"; '
+            raise ValidationError(f'поле должно начинатьс с цифры "7";')
 
 
 class DateField(BaseField):
-    def validate(self, value, obj):
-        super().validate(value, obj)
+    def valid(self, value):
+        super().valid(value)
         if value:
             try:
                 datetime.datetime.strptime(value, '%d.%m.%Y')
             except ValueError:
-                obj.error_messages += f'поле "{self.public_name}" должно быть в формате "DD.MM.YYYY"; '
+                raise ValidationError(f'поле должно быть в формате "DD.MM.YYYY";')
 
 
-class BirthDayField(CharField):
-    def validate(self, value, obj):
-        super().validate(value, obj)
+class BirthDayField(DateField):
+    def valid(self, value):
+        super().valid(value)
         if value:
             try:
-                bd = datetime.datetime.strptime(value, '%d.%m.%Y')
+                if datetime.datetime.now().year - datetime.datetime.strptime(value, '%d.%m.%Y').year > 70:
+                    raise ValidationError(f'поле должно быть не старше 70 лет;')
             except ValueError:
-                obj.error_messages += f'поле "{self.public_name}" должно быть в формате "DD.MM.YYYY"; '
-            else:
-                if datetime.datetime.now().year - bd.year > 70:
-                    obj.error_messages += f'поле "{self.public_name}" должно быть не старше 70 лет; '
+                pass
 
 
 class GenderField(BaseField):
-    def validate(self, value, obj):
-        super().validate(value, obj)
+    def valid(self, value):
+        super().valid(value)
         if value and value not in [0, 1, 2]:
-            obj.error_messages += f'поле "{self.public_name}" должно содержать одно из значений [0, 1, 2]; '
+            raise ValidationError(f'поле должно содержать одно из значений [0, 1, 2];')
 
 
 class ClientIDsField(BaseField):
-    def validate(self, value, obj):
-        super().validate(value, obj)
+    def valid(self, value):
+        super().valid(value)
         if not isinstance(value, list):
-            obj.error_messages += f'поле "{self.public_name}" должно быть массивом; '
+            raise ValidationError(f'поле должно быть массивом;')
         else:
             if not all([isinstance(i, int) for i in value]):
-                obj.error_messages += f'поле "{self.public_name}" массив должен состоять из чисел; '
+                raise ValidationError(f'поле массив должен состоять из чисел;')
 
 
-class ClientsInterestsRequest(object):
+class RequestMeta(type):
+    """у создаваемого класса убираем все дескрипторы в отдельный словарь "fields" """
+    def __new__(mcl, name, bases, attrs):
+        fields = {}
+        for key, value in list(attrs.items()):
+            if isinstance(value, BaseField):
+                fields[key] = attrs.pop(key)
+        attrs['fields'] = fields
+        return super().__new__(mcl, name, bases, attrs)
+
+
+class BaseRequest(metaclass=RequestMeta):
+    def __init__(self, request_fields=None):
+        self.request_fields = request_fields
+        self.err_msg = ''
+
+    def __getattr__(self, item):
+        return self.request_fields.get(item) or ''
+
+    def is_valid(self):
+        return all(self.field_is_correct(fn, fo) for fn, fo in self.fields.items())
+
+    def field_is_correct(self, field_name, field_obj):
+        value = self.request_fields.get(field_name)
+        try:
+            field_obj.valid(value)
+            return True
+        except ValidationError as err:
+            msg = f'Поле "{field_name}" со значением "{value}", не валидно({err})\n'
+            self.err_msg += msg
+            logging.error(msg)
+            return False
+
+
+class ClientsInterestsRequest(BaseRequest):
     client_ids = ClientIDsField(required=True)
     date = DateField(required=False, nullable=True)
 
+    def set_context(self, ctx):
+        ctx['nclients'] = len(self.client_ids)
 
-class OnlineScoreRequest(object):
+    def get_answer(self, store):
+        answer = {}
+        for cid in self.client_ids:
+            answer[cid] = get_interests(store, cid)
+        return answer
+
+
+class OnlineScoreRequest(BaseRequest):
     phone = PhoneField(required=False, nullable=True)
     email = EmailField(required=False, nullable=True)
     first_name = CharField(required=False, nullable=True)
@@ -154,62 +187,22 @@ class OnlineScoreRequest(object):
     birthday = BirthDayField(required=False, nullable=True)
     gender = GenderField(required=False, nullable=True)
 
-
-class MethodRequest(object):
-    account = CharField(required=False, nullable=True)
-    login = CharField(required=True, nullable=True)
-    token = CharField(required=True, nullable=True)
-    arguments = ArgumentsField(required=True, nullable=True)
-    method = CharField(required=True, nullable=False)
-
-    @property
-    def is_admin(self):
-        return self.login == ADMIN_LOGIN
-
-
-class ValidatorMethodRequest(MethodRequest):
-    def __init__(self, body):
-        self.error_messages = ''
-        self.account = body
-        self.login = body
-        self.token = body
-        self.arguments = body
-        self.method = body
-
-
-class ValidatorOnlineScoreRequest(OnlineScoreRequest):
-    def __init__(self, arguments):
-        self.error_messages = ''
-        self.phone = arguments
-        self.email = arguments
-        self.first_name = arguments
-        self.last_name = arguments
-        self.birthday = arguments
-        self.gender = arguments
-
-    def validate(self):
-        if not ((self.phone and self.email) or
-                (self.first_name and self.last_name) or
-                ((self.gender is not None) and self.birthday)):
-            self.error_messages += 'должна присутсвует хоть одна пара ' \
-                                   '"phone-email, first name-last name, gender-birthday" с непустыми значениями'
+    def is_valid(self):
+        return super().is_valid() and self.valid_pair_fields()
 
     def set_context(self, ctx):
-        has = []
-        if self.phone:
-            has.append('phone')
-        if self.email:
-            has.append('email')
-        if self.first_name:
-            has.append('first_name')
-        if self.last_name:
-            has.append('last_name')
-        if self.birthday:
-            has.append('birthday')
-        if self.gender is not None:
-            has.append('gender')
-
+        has = [field for field in self.fields if self.request_fields.get(field) is not None]
+        logging.info(f'Получены поля {has}')
         ctx['has'] = has
+
+    def valid_pair_fields(self):
+        for field1, field2 in [("phone", "email"),
+                               ("first_name", "last_name"),
+                               ("gender", "birthday")]:
+            if self.request_fields.get(field1) is not None and self.request_fields.get(field2) is not None:
+                return True
+
+        self.err_msg += f'Парные поля не валидны\n'
 
     def get_answer(self, store):
         return {'score': get_score(
@@ -222,23 +215,16 @@ class ValidatorOnlineScoreRequest(OnlineScoreRequest):
             last_name=self.last_name)}
 
 
-class ValidatorClientsInterestsRequest(ClientsInterestsRequest):
-    def __init__(self, arguments):
-        self.error_messages = ''
-        self.client_ids = arguments
-        self.date = arguments
+class MethodRequest(BaseRequest):
+    account = CharField(required=False, nullable=True)
+    login = CharField(required=True, nullable=True)
+    token = CharField(required=True, nullable=True)
+    arguments = ArgumentsField(required=True, nullable=True)
+    method = CharField(required=True, nullable=False)
 
-    def validate(self):
-        pass
-
-    def set_context(self, ctx):
-        ctx['nclients'] = len(self.client_ids)
-
-    def get_answer(self, store):
-        answer = {}
-        for cid in self.client_ids:
-            answer[cid] = get_interests(store, cid)
-        return answer
+    @property
+    def is_admin(self):
+        return self.login == ADMIN_LOGIN
 
 
 def check_auth(request):
@@ -253,27 +239,25 @@ def check_auth(request):
 
 
 def method_handler(request, ctx, store):
-    body, headers = request['body'], request['headers']
     methods = {
-        'online_score': ValidatorOnlineScoreRequest,
-        'clients_interests': ValidatorClientsInterestsRequest,
-    }
+        'online_score': OnlineScoreRequest,
+        'clients_interests': ClientsInterestsRequest, }
 
-    vmr = ValidatorMethodRequest(body)
-    if vmr.error_messages:
-        return vmr.error_messages, INVALID_REQUEST
+    body, headers = request['body'], request['headers']
+    mr = MethodRequest(body)
+    if not mr.is_valid():
+        return mr.err_msg, INVALID_REQUEST
 
-    if not check_auth(vmr):
+    if not check_auth(mr):
         logging.info('Bad auth')
         return ERRORS[FORBIDDEN], FORBIDDEN
 
-    method = methods[body['method']](arguments=body['arguments'])
-    method.validate()
+    method = methods[body['method']](request_fields=body['arguments'])
 
-    if method.error_messages:
-        return method.error_messages, INVALID_REQUEST
+    if not method.is_valid():
+        return method.err_msg, INVALID_REQUEST
 
-    if vmr.is_admin:
+    if mr.is_admin:
         return {'score': 42}, OK
 
     method.set_context(ctx)
