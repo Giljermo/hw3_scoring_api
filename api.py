@@ -172,12 +172,6 @@ class ClientsInterestsRequest(BaseRequest):
     def set_context(self, ctx):
         ctx['nclients'] = len(self.client_ids)
 
-    def get_answer(self, store):
-        answer = {}
-        for cid in self.client_ids:
-            answer[cid] = get_interests(store, cid)
-        return answer
-
 
 class OnlineScoreRequest(BaseRequest):
     phone = PhoneField(required=False, nullable=True)
@@ -204,16 +198,6 @@ class OnlineScoreRequest(BaseRequest):
 
         self.err_msg += f'Парные поля не валидны\n'
 
-    def get_answer(self, store):
-        return {'score': get_score(
-            store=store,
-            phone=self.phone,
-            email=self.email,
-            birthday=self.birthday,
-            gender=self.gender,
-            first_name=self.first_name,
-            last_name=self.last_name)}
-
 
 class MethodRequest(BaseRequest):
     account = CharField(required=False, nullable=True)
@@ -238,10 +222,26 @@ def check_auth(request):
     return False
 
 
+def online_score_handler(request, store):
+    return {'score': get_score(store=store,
+                               phone=request.phone,
+                               email=request.email,
+                               birthday=request.birthday,
+                               gender=request.gender,
+                               first_name=request.first_name,
+                               last_name=request.last_name)}, OK
+
+
+def clients_interests_handler(request, store):
+    return {cid: get_interests(store, cid) for cid in request.client_ids}, OK
+
+
 def method_handler(request, ctx, store):
-    methods = {
-        'online_score': OnlineScoreRequest,
-        'clients_interests': ClientsInterestsRequest, }
+    requests = {'online_score': OnlineScoreRequest,
+                'clients_interests': ClientsInterestsRequest}
+
+    methods = {'online_score': online_score_handler,
+               'clients_interests': clients_interests_handler}
 
     body, headers = request['body'], request['headers']
     mr = MethodRequest(body)
@@ -252,16 +252,17 @@ def method_handler(request, ctx, store):
         logging.info('Bad auth')
         return ERRORS[FORBIDDEN], FORBIDDEN
 
-    method = methods[body['method']](request_fields=body['arguments'])
+    request = requests[body['method']](request_fields=body['arguments'])
+    method = methods[body['method']]
 
-    if not method.is_valid():
-        return method.err_msg, INVALID_REQUEST
+    if not request.is_valid():
+        return request.err_msg, INVALID_REQUEST
 
     if mr.is_admin:
         return {'score': 42}, OK
 
-    method.set_context(ctx)
-    return method.get_answer(store), OK
+    request.set_context(ctx)
+    return method(request, store)
 
 
 class MainHTTPHandler(BaseHTTPRequestHandler):
